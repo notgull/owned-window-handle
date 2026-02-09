@@ -121,6 +121,22 @@ fn inc_refcount(window: WindowHandle<'_>) -> Result<WindowHandle<'static>, Error
             RawWindowHandle::Wayland(wayland)
         }
 
+        #[cfg(not(target_os = "android"))]
+        RawWindowHandle::AndroidNdk(_) => {
+            return Err(Error(Repr::PlatformMismatch {
+                expected: "android",
+            }))
+        }
+
+        #[cfg(target_os = "android")]
+        RawWindowHandle::AndroidNdk(android) => {
+            // Use ANativeWindow_acquire to bump the reference count.
+            // SAFETY: `android` is a valid pointer to an `ANativeWindow`.
+            unsafe { ndk_sys::ANativeWindow_acquire(android.a_native_window.as_ptr().cast()) };
+
+            RawWindowHandle::AndroidNdk(android)
+        }
+
         #[cfg(not(target_family = "wasm"))]
         RawWindowHandle::Web(_)
         | RawWindowHandle::WebCanvas(_)
@@ -218,6 +234,20 @@ unsafe fn dec_refcount(window: WindowHandle<'static>) -> Result<(), Error> {
         RawWindowHandle::Wayland(_) => {
             // We did nothing with the window above, so no need to do anything
             // here either.
+        }
+
+        #[cfg(not(target_os = "android"))]
+        RawWindowHandle::AndroidNdk(_) => {
+            return Err(Error(Repr::PlatformMismatch {
+                expected: "android",
+            }))
+        }
+
+        #[cfg(target_os = "android")]
+        RawWindowHandle::AndroidNdk(android) => {
+            // Use ANativeWindow_acquire to bump the reference count.
+            // SAFETY: `android` is a valid pointer to an `ANativeWindow`.
+            unsafe { ndk_sys::ANativeWindow_release(android.a_native_window.as_ptr().cast()) };
         }
 
         RawWindowHandle::Web(_) => unreachable!("inc_refcount never constructs this variant"),
