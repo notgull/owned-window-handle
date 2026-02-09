@@ -53,7 +53,10 @@ impl OwnedWindowHandle {
 impl Drop for OwnedWindowHandle {
     fn drop(&mut self) {
         // SAFETY: Our handle was created via inc_refcount.
-        let _ = unsafe { dec_refcount(self.handle) };
+        let _result = unsafe { dec_refcount(self.handle) };
+
+        #[cfg(debug_assertions)]
+        _result.unwrap();
     }
 }
 
