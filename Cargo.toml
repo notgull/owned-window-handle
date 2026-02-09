@@ -1,0 +1,16 @@
+[package]
+name = "owned-window-handle"
+version = "0.1.0"
+edition = "2024"
+authors = ["John Nunley <dev@notgull.net>"]
+license = "MIT OR Apache-2.0 OR Zlib"
+readme = "README.md"
+rust-version = "1.64"
+keywords = ["windowing"]
+
+[dependencies]
+raw-window-handle = { version = "0.6.2", default-features = false }
+
+[features]
+default = ["std"]
+std = []
