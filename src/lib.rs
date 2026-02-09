@@ -82,6 +82,11 @@ impl fmt::Display for Error {
             Repr::Raw(HandleError::NotSupported) => write!(f, "unsupported platform"),
             Repr::Raw(HandleError::Unavailable) => write!(f, "window handle is unavailable"),
             Repr::Raw(_) => write!(f, "unknown raw window handle error"),
+            Repr::CanvasNotFound(id) => write!(f, "canvas not found with id: {}", id),
+            Repr::MissingWebElements => write!(f, "missing web elements"),
+            Repr::PlatformMismatch { expected } => {
+                write!(f, "platform mismatch, expected: {}", expected)
+            }
         }
     }
 }
@@ -114,6 +119,70 @@ fn inc_refcount(window: WindowHandle<'_>) -> Result<WindowHandle<'static>, Error
             //
             // TODO: I'm skeptical of this, check it later!
             RawWindowHandle::Wayland(wayland)
+        }
+
+        #[cfg(not(target_family = "wasm"))]
+        RawWindowHandle::Web(_)
+        | RawWindowHandle::WebCanvas(_)
+        | RawWindowHandle::WebOffscreenCanvas(_) => {
+            return Err(Error(Repr::PlatformMismatch { expected: "wasm" }))
+        }
+
+        #[cfg(target_family = "wasm")]
+        RawWindowHandle::Web(web) => {
+            use wasm_bindgen::convert::IntoWasmAbi;
+
+            // Grab the current document.
+            let document = web_sys::window()
+                .ok_or(Error(Repr::MissingWebElements))?
+                .document()
+                .ok_or(Error(Repr::MissingWebElements))?;
+
+            // Grab the element from its data segment.
+            let canvas: web_sys::Element = document
+                .query_selector(&format!("canvas[data-raw-handle=\"{}\"", web.id))
+                // `querySelector` only throws an error if the selector is invalid.
+                .unwrap()
+                .ok_or(Error(Repr::CanvasNotFound(web.id)))?;
+
+            // The refcount is already bumped by query_selector, convert it down.
+            RawWindowHandle::WebCanvas(raw_window_handle::WebCanvasWindowHandle::new(
+                canvas.into_abi() as usize,
+            ))
+        }
+
+        #[cfg(target_family = "wasm")]
+        RawWindowHandle::WebCanvas(web) => {
+            use wasm_bindgen::convert::{IntoWasmAbi, RefFromWasmAbi};
+
+            // Get the underlying canvas.
+            // SAFETY: Guaranteed to be a valid `HtmlCanvasElement`.
+            let canvas = unsafe { web_sys::HtmlCanvasElement::ref_from_abi(web.obj as _) };
+
+            // Clone the underlying JS object so we own it.
+            let canvas = (&*canvas).clone();
+
+            // The refcount is already bumped by query_selector, convert it down.
+            RawWindowHandle::WebCanvas(raw_window_handle::WebCanvasWindowHandle::new(
+                canvas.into_abi() as usize,
+            ))
+        }
+
+        #[cfg(target_family = "wasm")]
+        RawWindowHandle::WebOffscreenCanvas(web) => {
+            use wasm_bindgen::convert::{IntoWasmAbi, RefFromWasmAbi};
+
+            // Get the underlying canvas.
+            // SAFETY: Guaranteed to be a valid `OffscreenCanvas`.
+            let canvas = unsafe { web_sys::OffscreenCanvas::ref_from_abi(web.obj as _) };
+
+            // Clone the underlying JS object so we own it.
+            let canvas = (&*canvas).clone();
+
+            // The refcount is already bumped by query_selector, convert it down.
+            RawWindowHandle::WebOffscreenCanvas(
+                raw_window_handle::WebOffscreenCanvasWindowHandle::new(canvas.into_abi() as usize),
+            )
         }
 
         // Default case: platform this version of the code doesn't anticipate.
@@ -151,6 +220,33 @@ unsafe fn dec_refcount(window: WindowHandle<'static>) -> Result<(), Error> {
             // here either.
         }
 
+        RawWindowHandle::Web(_) => unreachable!("inc_refcount never constructs this variant"),
+
+        #[cfg(not(target_family = "wasm"))]
+        RawWindowHandle::WebCanvas(_) | RawWindowHandle::WebOffscreenCanvas(_) => {
+            return Err(Error(Repr::PlatformMismatch { expected: "wasm" }))
+        }
+
+        #[cfg(target_family = "wasm")]
+        RawWindowHandle::WebCanvas(web) => {
+            use wasm_bindgen::convert::FromWasmAbi;
+
+            // We created a new object here. Drop it.
+            // SAFETY: This is a valid, owned object as constructed above.
+            let canvas = unsafe { web_sys::HtmlCanvasElement::from_abi(web.obj as _) };
+            drop(canvas);
+        }
+
+        #[cfg(target_family = "wasm")]
+        RawWindowHandle::WebOffscreenCanvas(web) => {
+            use wasm_bindgen::convert::FromWasmAbi;
+
+            // We created a new object here. Drop it.
+            // SAFETY: This is a valid, owned object as constructed above.
+            let canvas = unsafe { web_sys::OffscreenCanvas::from_abi(web.obj as _) };
+            drop(canvas);
+        }
+
         // Default case: platform this version of the code doesn't anticipate.
         _ => return Err(HandleError::NotSupported.into()),
     }
@@ -159,8 +255,21 @@ unsafe fn dec_refcount(window: WindowHandle<'static>) -> Result<(), Error> {
 }
 
 /// Possible error codes.
+#[allow(dead_code)]
 #[derive(Debug)]
 enum Repr {
     /// Underlying [`raw-window-handle`] error.
     Raw(HandleError),
+
+    /// This is the wrong platform to use this function.
+    PlatformMismatch {
+        /// The platform we expected.
+        expected: &'static str,
+    },
+
+    /// Crucial elements are missing on web.
+    MissingWebElements,
+
+    /// Canvas not found with the specific ID.
+    CanvasNotFound(u32),
 }
