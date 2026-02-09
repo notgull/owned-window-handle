@@ -11,7 +11,7 @@
 //! [`raw-window-handle`]: https://crates.io/crates/raw-window-handle
 
 use core::fmt;
-use raw_window_handle::{HandleError, HasWindowHandle, WindowHandle};
+use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
 
 pub use raw_window_handle;
 
@@ -91,10 +91,37 @@ impl std::error::Error for Error {}
 
 /// Increment reference count of the underlying handle.
 fn inc_refcount(window: WindowHandle<'_>) -> Result<WindowHandle<'static>, Error> {
-    match window.as_raw() {
+    let raw = match window.as_raw() {
+        RawWindowHandle::Xlib(xlib) => {
+            // Xlib windows are just numeric ID's and are safe to use after destruction.
+            RawWindowHandle::Xlib(xlib)
+        }
+
+        RawWindowHandle::Xcb(xcb) => {
+            // XCB windows are just numeric ID's and are safe to use after destruction.
+            RawWindowHandle::Xcb(xcb)
+        }
+
+        RawWindowHandle::Win32(win32) => {
+            // Win32 windows are ID's into a thread local table.
+            // https://github.com/rust-windowing/raw-window-handle/issues/171#issuecomment-2282313064
+            RawWindowHandle::Win32(win32)
+        }
+
+        RawWindowHandle::Wayland(wayland) => {
+            // Wayland windows can be destroyed in safe code and are safe to
+            // use even after destruction.
+            //
+            // TODO: I'm skeptical of this, check it later!
+            RawWindowHandle::Wayland(wayland)
+        }
+
         // Default case: platform this version of the code doesn't anticipate.
-        _ => Err(HandleError::NotSupported.into()),
-    }
+        _ => return Err(HandleError::NotSupported.into()),
+    };
+
+    // SAFETY: See above comments, this is always a valid handle.
+    Ok(unsafe { WindowHandle::borrow_raw(raw) })
 }
 
 /// Decrement reference count of the underlying handle.
@@ -104,9 +131,31 @@ fn inc_refcount(window: WindowHandle<'_>) -> Result<WindowHandle<'static>, Error
 /// `window` must have been created via [`inc_refcount`].
 unsafe fn dec_refcount(window: WindowHandle<'static>) -> Result<(), Error> {
     match window.as_raw() {
+        RawWindowHandle::Xlib(_) => {
+            // We did nothing with the window above, so no need to do anything
+            // here either.
+        }
+
+        RawWindowHandle::Xcb(_) => {
+            // We did nothing with the window above, so no need to do anything
+            // here either.
+        }
+
+        RawWindowHandle::Win32(_) => {
+            // We did nothing with the window above, so no need to do anything
+            // here either.
+        }
+
+        RawWindowHandle::Wayland(_) => {
+            // We did nothing with the window above, so no need to do anything
+            // here either.
+        }
+
         // Default case: platform this version of the code doesn't anticipate.
-        _ => Err(HandleError::NotSupported.into()),
+        _ => return Err(HandleError::NotSupported.into()),
     }
+
+    Ok(())
 }
 
 /// Possible error codes.
