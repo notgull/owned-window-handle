@@ -87,6 +87,7 @@ impl fmt::Display for Error {
             Repr::PlatformMismatch { expected } => {
                 write!(f, "platform mismatch, expected: {}", expected)
             }
+            Repr::RetainFailed => write!(f, "failed to retain window handle"),
         }
     }
 }
@@ -135,6 +136,41 @@ fn inc_refcount(window: WindowHandle<'_>) -> Result<WindowHandle<'static>, Error
             unsafe { ndk_sys::ANativeWindow_acquire(android.a_native_window.as_ptr().cast()) };
 
             RawWindowHandle::AndroidNdk(android)
+        }
+
+        #[cfg(not(target_vendor = "apple"))]
+        RawWindowHandle::AppKit(_) | RawWindowHandle::UiKit(_) => {
+            return Err(Error(Repr::PlatformMismatch { expected: "apple" }))
+        }
+
+        #[cfg(target_vendor = "apple")]
+        RawWindowHandle::AppKit(appkit) => {
+            use core::ptr::NonNull;
+            use objc2::runtime::NSObject;
+
+            // Use the "retain" message to retain the object.
+            // SAFETY: We know this is a valid `NSView`.
+            let view: *mut NSObject = appkit.ns_view.as_ptr().cast();
+            let view: *mut NSObject = unsafe { objc2::msg_send![view, retain] };
+
+            RawWindowHandle::AppKit(raw_window_handle::AppKitWindowHandle::new({
+                NonNull::new(view).ok_or(Error(Repr::RetainFailed))?.cast()
+            }))
+        }
+
+        #[cfg(target_vendor = "apple")]
+        RawWindowHandle::UiKit(uikit) => {
+            use core::ptr::NonNull;
+            use objc2::runtime::NSObject;
+
+            // Use the "retain" message to retain the object.
+            // SAFETY: We know this is a valid `UiView`.
+            let view: *mut NSObject = uikit.ui_view.as_ptr().cast();
+            let view: *mut NSObject = unsafe { objc2::msg_send![view, retain] };
+
+            RawWindowHandle::UiKit(raw_window_handle::UiKitWindowHandle::new({
+                NonNull::new(view).ok_or(Error(Repr::RetainFailed))?.cast()
+            }))
         }
 
         #[cfg(not(target_family = "wasm"))]
@@ -250,6 +286,31 @@ unsafe fn dec_refcount(window: WindowHandle<'static>) -> Result<(), Error> {
             unsafe { ndk_sys::ANativeWindow_release(android.a_native_window.as_ptr().cast()) };
         }
 
+        #[cfg(not(target_vendor = "apple"))]
+        RawWindowHandle::AppKit(_) | RawWindowHandle::UiKit(_) => {
+            return Err(Error(Repr::PlatformMismatch { expected: "apple" }))
+        }
+
+        #[cfg(target_vendor = "apple")]
+        RawWindowHandle::AppKit(appkit) => {
+            use objc2::runtime::NSObject;
+
+            // Use the "release" message to release the object.
+            // SAFETY: We know this is a valid `NsView`.
+            let view: *mut NSObject = appkit.ns_view.as_ptr().cast();
+            let _: () = unsafe { objc2::msg_send![view, release] };
+        }
+
+        #[cfg(target_vendor = "apple")]
+        RawWindowHandle::UiKit(uikit) => {
+            use objc2::runtime::NSObject;
+
+            // Use the "release" message to release the object.
+            // SAFETY: We know this is a valid `UiView`.
+            let view: *mut NSObject = uikit.ui_view.as_ptr().cast();
+            let _: () = unsafe { objc2::msg_send![view, release] };
+        }
+
         RawWindowHandle::Web(_) => unreachable!("inc_refcount never constructs this variant"),
 
         #[cfg(not(target_family = "wasm"))]
@@ -302,4 +363,7 @@ enum Repr {
 
     /// Canvas not found with the specific ID.
     CanvasNotFound(u32),
+
+    /// Retain failed.
+    RetainFailed,
 }
