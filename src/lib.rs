@@ -125,6 +125,11 @@ fn inc_refcount(window: WindowHandle<'_>) -> Result<WindowHandle<'static>, Error
             RawWindowHandle::Wayland(wayland)
         }
 
+        RawWindowHandle::Drm(drm) => {
+            // DRM planes are just numeric ID's and are safe to use after destruction.
+            RawWindowHandle::Drm(drm)
+        }
+
         #[cfg(not(target_os = "android"))]
         RawWindowHandle::AndroidNdk(_) => {
             return Err(Error(Repr::PlatformMismatch {
@@ -271,6 +276,11 @@ unsafe fn dec_refcount(window: WindowHandle<'static>) -> Result<(), Error> {
         }
 
         RawWindowHandle::Wayland(_) => {
+            // We did nothing with the window above, so no need to do anything
+            // here either.
+        }
+
+        RawWindowHandle::Drm(_) => {
             // We did nothing with the window above, so no need to do anything
             // here either.
         }
