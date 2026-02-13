@@ -19,8 +19,19 @@ pub use raw_window_handle;
 ///
 /// See [crate level documentation](crate) for more information.
 pub struct OwnedWindowHandle {
-    /// Underlying owned handle.
-    handle: WindowHandle<'static>,
+    /// Underlying implementation.
+    imp: Impl,
+}
+
+/// Underlying implementation.
+enum Impl {
+    /// Static window that can be refcounted.
+    ///
+    /// Every backend except for Wayland uses this.
+    Direct(WindowHandle<'static>),
+
+    /// Direct Wayland object ID.
+    Wayland(wayland::WaylandHandle),
 }
 
 impl fmt::Debug for OwnedWindowHandle {
@@ -39,31 +50,48 @@ impl OwnedWindowHandle {
 
     fn _new(handle: WindowHandle<'_>) -> Result<Self, Error> {
         Ok(Self {
-            handle: inc_refcount(handle)?,
+            imp: inc_refcount(handle)?,
         })
     }
 
     /// Clone this window handle.
     #[inline]
     pub fn try_clone(&self) -> Result<Self, Error> {
-        Self::_new(self.handle)
+        match &self.imp {
+            Impl::Direct(handle) => {
+                // Just increment refcount on the handle.
+                Self::_new(*handle)
+            }
+
+            Impl::Wayland(wayland) => {
+                // wayland-backend's objects can be cheaply cloned.
+                Ok(Self {
+                    imp: Impl::Wayland(wayland.clone()),
+                })
+            }
+        }
     }
 }
 
 impl Drop for OwnedWindowHandle {
     fn drop(&mut self) {
-        // SAFETY: Our handle was created via inc_refcount.
-        let _result = unsafe { dec_refcount(self.handle) };
+        if let Impl::Direct(handle) = self.imp {
+            // SAFETY: Our handle was created via inc_refcount.
+            let _result = unsafe { dec_refcount(handle) };
 
-        #[cfg(debug_assertions)]
-        _result.unwrap();
+            #[cfg(debug_assertions)]
+            _result.unwrap();
+        }
     }
 }
 
 impl HasWindowHandle for OwnedWindowHandle {
     #[inline]
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        Ok(self.handle)
+        match &self.imp {
+            Impl::Direct(handle) => Ok(*handle),
+            Impl::Wayland(wayland) => wayland::as_ptr(wayland),
+        }
     }
 }
 
@@ -91,6 +119,11 @@ impl fmt::Display for Error {
                 write!(f, "platform mismatch, expected: {}", expected)
             }
             Repr::RetainFailed => write!(f, "failed to retain window handle"),
+            Repr::WaylandNotEnabled => write!(f, "Wayland is not enabled"),
+            Repr::WaylandNotRust => write!(
+                f,
+                "the resulting Wayland handle was not created by Rust's `wayland-backend`"
+            ),
         }
     }
 }
@@ -99,7 +132,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// Increment reference count of the underlying handle.
-fn inc_refcount(window: WindowHandle<'_>) -> Result<WindowHandle<'static>, Error> {
+fn inc_refcount(window: WindowHandle<'_>) -> Result<Impl, Error> {
     let raw = match window.as_raw() {
         RawWindowHandle::Xlib(xlib) => {
             // Xlib windows are just numeric ID's and are safe to use after destruction.
@@ -118,11 +151,8 @@ fn inc_refcount(window: WindowHandle<'_>) -> Result<WindowHandle<'static>, Error
         }
 
         RawWindowHandle::Wayland(wayland) => {
-            // Wayland windows can be destroyed in safe code and are safe to
-            // use even after destruction.
-            //
-            // TODO: I'm skeptical of this, check it later!
-            RawWindowHandle::Wayland(wayland)
+            // Wayland windows need to be tracked by wayland-backend.
+            return Ok(Impl::Wayland(unsafe { wayland::clone_handle(wayland) }?));
         }
 
         RawWindowHandle::Drm(drm) => {
@@ -250,7 +280,7 @@ fn inc_refcount(window: WindowHandle<'_>) -> Result<WindowHandle<'static>, Error
     };
 
     // SAFETY: See above comments, this is always a valid handle.
-    Ok(unsafe { WindowHandle::borrow_raw(raw) })
+    Ok(Impl::Direct(unsafe { WindowHandle::borrow_raw(raw) }))
 }
 
 /// Decrement reference count of the underlying handle.
@@ -275,10 +305,7 @@ unsafe fn dec_refcount(window: WindowHandle<'static>) -> Result<(), Error> {
             // here either.
         }
 
-        RawWindowHandle::Wayland(_) => {
-            // We did nothing with the window above, so no need to do anything
-            // here either.
-        }
+        RawWindowHandle::Wayland(_) => unreachable!("inc_refcount never creates this variant"),
 
         RawWindowHandle::Drm(_) => {
             // We did nothing with the window above, so no need to do anything
@@ -379,4 +406,119 @@ enum Repr {
 
     /// Retain failed.
     RetainFailed,
+
+    /// Wayland is not enabled.
+    WaylandNotEnabled,
+
+    /// The resulting Wayland handle was not created by Rust's `wayland-backend`.
+    WaylandNotRust,
+}
+
+#[cfg(any(
+    not(feature = "wayland"),
+    not(all(
+        unix,
+        not(any(
+            target_os = "redox",
+            target_family = "wasm",
+            target_os = "android",
+            target_vendor = "apple"
+        ))
+    ))
+))]
+mod wayland {
+    /// Wayland handle.
+    pub(super) type WaylandHandle = core::convert::Infallible;
+
+    /// Create a new `WaylandHandle` from the raw wayland handle.
+    pub(super) unsafe fn clone_handle(
+        _handle: raw_window_handle::WaylandWindowHandle,
+    ) -> Result<WaylandHandle, crate::Error> {
+        Err(crate::Error(crate::Repr::WaylandNotEnabled))
+    }
+
+    /// Convert the `WaylandHandle` into a window handle.
+    pub(super) fn as_ptr(
+        handle: &WaylandHandle,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        match *handle {}
+    }
+}
+
+#[cfg(all(
+    feature = "wayland",
+    unix,
+    not(any(
+        target_os = "redox",
+        target_family = "wasm",
+        target_os = "android",
+        target_vendor = "apple"
+    ))
+))]
+mod wayland {
+    use wayland_backend::sys::client as wc;
+    use wayland_client::Proxy;
+
+    /// Tracked Wayland handle.
+    #[derive(Clone)]
+    pub(super) struct WaylandHandle {
+        /// The Wayland backend.
+        backend: wc::Backend,
+
+        /// The Wayland object ID.
+        id: wc::ObjectId,
+    }
+
+    /// Get a `WaylandHandle` from a `*mut wl_proxy`.
+    pub(super) unsafe fn clone_handle(
+        handle: raw_window_handle::WaylandWindowHandle,
+    ) -> Result<WaylandHandle, crate::Error> {
+        let ptr = handle.surface;
+
+        // Get the `Backend`.
+        let backend = backend_from_ptr(ptr.as_ptr().cast());
+
+        // Create the `ObjectId` from the `wl_surface` pointer.
+        let id = wc::ObjectId::from_ptr(
+            wayland_client::protocol::wl_surface::WlSurface::interface(),
+            ptr.as_ptr().cast(),
+        )
+        .map_err(|_| crate::Error(crate::Repr::WaylandNotRust))?;
+
+        /* Ensure the object is owned by Rust's wayland-backend. */
+        if backend.get_data(id.clone()).is_err() {
+            return Err(crate::Error(crate::Repr::WaylandNotRust));
+        }
+
+        Ok(WaylandHandle { backend, id })
+    }
+
+    /// Convert the `WaylandHandle` into a window handle.
+    pub(super) fn as_ptr(
+        handle: &WaylandHandle,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        match core::ptr::NonNull::new(handle.id.as_ptr()) {
+            None => Err(raw_window_handle::HandleError::Unavailable),
+            Some(non_null) => {
+                let raw = raw_window_handle::WaylandWindowHandle::new(non_null.cast()).into();
+
+                // SAFETY: The proxy is being kept alive, so we know it's valid.
+                Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })
+            }
+        }
+    }
+
+    /// Gets the `Backend` from a `*mut wl_proxy`.
+    ///
+    /// # Safety
+    ///
+    /// The `wl_proxy` pointer must be valid and point to a Wayland object.
+    pub(super) unsafe fn backend_from_ptr(ptr: *mut wayland_sys::client::wl_proxy) -> wc::Backend {
+        use wayland_sys::client::*;
+
+        let back_ptr =
+            wayland_sys::ffi_dispatch!(wayland_client_handle(), wl_proxy_get_display, ptr);
+
+        wc::Backend::from_foreign_display(back_ptr)
+    }
 }

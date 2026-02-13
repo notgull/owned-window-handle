@@ -11,6 +11,11 @@ keywords = ["windowing"]
 [dependencies]
 raw-window-handle = { version = "0.6.2", default-features = false }
 
+[target.'cfg(all(unix, not(any(target_os = "redox", target_family = "wasm", target_os = "android", target_vendor = "apple"))))'.dependencies]
+wayland-backend = { version = "0.3.0", default-features = false, features = ["client_system"], optional = true }
+wayland-client = { version = "0.31.2", default-features = false, optional = true }
+wayland-sys = { version = "0.31.1", default-features = false, optional = true, features = ["client"] }
+
 [target.'cfg(target_vendor = "apple")'.dependencies]
 objc2 = { version = "0.5.2", default-features = false, features = ["std"] }
 
@@ -27,8 +32,9 @@ web-sys = { version = "0.3.0", default-features = false, features = [
 ] }
 
 [features]
-default = ["std"]
+default = ["std", "wayland"]
 std = []
+wayland = ["dep:wayland-backend", "dep:wayland-client", "dep:wayland-sys"]
 
 [dev-dependencies]
 winit = { version = "0.30.12", features = ["android-native-activity"] }
