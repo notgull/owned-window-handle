@@ -462,9 +462,6 @@ mod wayland {
     /// Tracked Wayland handle.
     #[derive(Clone)]
     pub(super) struct WaylandHandle {
-        /// The Wayland backend.
-        backend: wc::Backend,
-
         /// The Wayland object ID.
         id: wc::ObjectId,
     }
@@ -490,7 +487,7 @@ mod wayland {
             return Err(crate::Error(crate::Repr::WaylandNotRust));
         }
 
-        Ok(WaylandHandle { backend, id })
+        Ok(WaylandHandle { id })
     }
 
     /// Convert the `WaylandHandle` into a window handle.
