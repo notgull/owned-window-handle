@@ -472,15 +472,19 @@ mod wayland {
     ) -> Result<WaylandHandle, crate::Error> {
         let ptr = handle.surface;
 
-        // Get the `Backend`.
-        let backend = backend_from_ptr(ptr.as_ptr().cast());
-
         // Create the `ObjectId` from the `wl_surface` pointer.
         let id = wc::ObjectId::from_ptr(
             wayland_client::protocol::wl_surface::WlSurface::interface(),
             ptr.as_ptr().cast(),
         )
         .map_err(|_| crate::Error(crate::Repr::WaylandNotRust))?;
+
+        // Get the `Backend` so we can call `get_data()`.
+        let display_ptr = id.display_ptr();
+        if display_ptr.is_null() {
+            return Err(crate::Error(crate::Repr::WaylandNotRust));
+        }
+        let backend = unsafe { wc::Backend::from_foreign_display(display_ptr) };
 
         /* Ensure the object is owned by Rust's wayland-backend. */
         if backend.get_data(id.clone()).is_err() {
@@ -503,19 +507,5 @@ mod wayland {
                 Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(raw) })
             }
         }
-    }
-
-    /// Gets the `Backend` from a `*mut wl_proxy`.
-    ///
-    /// # Safety
-    ///
-    /// The `wl_proxy` pointer must be valid and point to a Wayland object.
-    pub(super) unsafe fn backend_from_ptr(ptr: *mut wayland_sys::client::wl_proxy) -> wc::Backend {
-        use wayland_sys::client::*;
-
-        let back_ptr =
-            wayland_sys::ffi_dispatch!(wayland_client_handle(), wl_proxy_get_display, ptr);
-
-        wc::Backend::from_foreign_display(back_ptr)
     }
 }
